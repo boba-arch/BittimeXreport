@@ -89,8 +89,14 @@ processed or alerted on twice, even across restarts.
 The scraper builds a single query like:
 
 ```
-(@bittimeexchange OR "Bittime") -is:retweet -from:bittimeexchange
+(@bittimeexchange OR to:bittimeexchange OR "Bittime") -is:retweet -from:bittimeexchange
 ```
+
+- `@bittimeexchange` catches tweets that mention/tag the account.
+- `to:bittimeexchange` catches **replies to Bittime's own tweets**, even when
+  the reply text doesn't literally contain "@bittimeexchange" (X still tracks
+  who a reply is directed at even if the visible @mention is deleted).
+- `"Bittime"` catches any tweet containing that keyword.
 
 - Retweets are excluded (pure reposts add noise, no new text to review).
 - Replies and quote tweets ARE included, since complaints/questions often show

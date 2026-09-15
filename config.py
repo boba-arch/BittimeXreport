@@ -46,11 +46,16 @@ DEBUG = os.getenv("DEBUG", "0") == "1"
 def build_search_query() -> str:
     """Build the X API v2 recent-search query string.
 
-    Matches mentions of any tracked account (@handle) OR any tracked keyword,
-    excludes retweets, and excludes posts authored by the tracked accounts
+    Matches, for each tracked account: mentions (@handle) OR replies to that
+    account's tweets (to:handle -- catches replies even when the reply text
+    doesn't literally contain "@handle"). Also matches any tracked keyword.
+    Excludes retweets and excludes posts authored by the tracked accounts
     themselves, so only what OTHER people say is caught.
     """
-    account_terms = [f"@{acct}" for acct in X_TRACK_ACCOUNTS]
+    account_terms = []
+    for acct in X_TRACK_ACCOUNTS:
+        account_terms.append(f"@{acct}")
+        account_terms.append(f"to:{acct}")
     keyword_terms = [f'"{kw}"' for kw in X_TRACK_KEYWORDS]
     all_terms = account_terms + keyword_terms
     match_clause = f"({' OR '.join(all_terms)})"
