@@ -14,18 +14,24 @@ to a Telegram channel, and posts a periodic AI-written summary report.
 ```
 x_scraper.py        -> polls X API v2 /2/tweets/search/recent every N minutes
                         (default 5), stores new tweets in SQLite
-ai_classifier.py     -> sends each new tweet's text to Claude, classifies as
-                        useful (complaint/question/advice/recommendation) or
-                        not (promotional/KOL/other)
-telegram_notifier.py -> pushes each "useful" tweet to a Telegram chat
-reporter.py           -> every N minutes (default 60), asks Claude to summarize
-                        all tweets + reasoning since the last report, saves it
+telegram_notifier.py -> pushes EVERY newly scraped tweet straight to a
+                        Telegram chat, immediately, unfiltered -- no AI
+                        involved at this point
+ai_classifier.py     -> classifies a tweet's text via Claude as useful
+                        (complaint/question/advice/recommendation) or not
+                        (promotional/KOL/other) -- only ever called from
+                        reporter.py, right before a report is built
+reporter.py           -> every N minutes (default 60): classifies every tweet
+                        scraped since the last report (the only point the AI
+                        analyzes/categorizes anything), then renders a PDF
+                        listing them all with category + reasoning, saves it
                         to reports/, and sends it to Telegram
-main.py               -> ties it together with an in-process scheduler
+main.py               -> ties it together with an in-process scheduler:
+                        scrape+push on one schedule, classify+report on another
 ```
 
 All state lives in a local SQLite file (`data/tweets.db`) so tweets are never
-processed or alerted on twice, even across restarts.
+pushed or reported on twice, even across restarts.
 
 ## Setup
 
@@ -110,25 +116,30 @@ The scraper builds a single query like:
 
 ## Classification logic
 
-Each new tweet's text is sent to Claude with a system prompt that sorts it
-into: `complaint`, `question`, `advice`, `recommendation`, `promotional`, or
-`other`. Only the first four count as "useful" and get pushed to Telegram;
-promotional/KOL hype and unrelated "other" mentions are logged in the DB (and
-still show up in the report's stats) but don't trigger an alert.
+Tweets are **not** filtered before alerting — every new tweet matching the
+scrape query is pushed to Telegram the moment it's found, promotional/KOL
+noise included.
+
+AI classification happens only in `reporter.py`, right before each report is
+built. At that point, every tweet scraped since the last report gets sent to
+Claude and sorted into: `complaint`, `question`, `advice`, `recommendation`,
+`promotional`, or `other`. The first four are flagged "useful" in the report's
+stats; all six categories (with per-tweet reasoning) show up in the PDF.
 
 If a classification call fails (network hiccup, rate limit, etc.) the tweet
 is safely defaulted to not-useful/other and logged, rather than crashing the
-loop or getting stuck forever unclassified.
+report or getting stuck forever unclassified.
 
 ## Reports
 
 Every `REPORT_INTERVAL_MINUTES`, `reporter.py`:
-1. Pulls all classified tweets since the last report.
+1. Classifies every tweet scraped since the last report (the only point the
+   AI ever looks at a tweet — see above).
 2. Asks Claude to write a short plain-English summary (volume, key
    complaints, notable questions/advice, noise level).
 3. Renders a **PDF** (via reportlab) with an overview stats table, the AI
    summary, and a color-coded tweet-by-tweet detail section (category,
-   author, text, why it was flagged, link) — saved to `reports/`.
+   author, text, why it was categorized that way, link) — saved to `reports/`.
 4. Sends the PDF to `TELEGRAM_REPORT_CHAT_ID` as a Telegram document, with a
    short caption (total tweets / useful count) since Telegram captions are
    capped at 1024 characters.

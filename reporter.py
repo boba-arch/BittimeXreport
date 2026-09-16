@@ -24,6 +24,7 @@ from reportlab.platypus import (
 
 import config
 import db
+import ai_classifier
 import telegram_notifier
 
 log = logging.getLogger("reporter")
@@ -206,8 +207,38 @@ def _build_pdf(
     doc.build(story)
 
 
+def classify_pending_tweets() -> int:
+    """Run AI classification over every tweet scraped since the last report.
+
+    This is the ONLY place classification happens now -- tweets are pushed to
+    Telegram raw/unfiltered the moment they're scraped, and the AI only
+    analyzes + categorizes them here, right before the report is built.
+    Returns how many tweets were classified.
+    """
+    pending = db.get_unclassified_tweets(limit=1000)
+    for tweet in pending:
+        result = ai_classifier.classify_tweet(tweet["text"])
+        db.mark_classified(
+            tweet["tweet_id"], result["useful"], result["category"], result["reasoning"]
+        )
+        log.info(
+            "Classified @%s [%s | useful=%s]: %s\n    Reasoning: %s",
+            tweet["author_username"] or "unknown",
+            result["category"],
+            result["useful"],
+            tweet["text"],
+            result["reasoning"],
+        )
+    if pending:
+        log.info("Classified %d tweet(s) for this report.", len(pending))
+    return len(pending)
+
+
 def generate_report() -> tuple[str, str]:
-    """Build the PDF report, save it to disk, and return (pdf_path, short_caption)."""
+    """Classify anything pending, build the PDF report, save it to disk, and
+    return (pdf_path, short_caption)."""
+    classify_pending_tweets()
+
     tweets = db.get_tweets_for_report(limit=1000)
 
     now = datetime.now(timezone.utc)

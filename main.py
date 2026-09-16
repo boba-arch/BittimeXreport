@@ -1,25 +1,21 @@
-"""Entry point: schedules the three independent stages and runs them on a loop.
+"""Entry point: schedules the two independent stages and runs them on a loop.
 
-Stage 1 - SCRAPE (every SCRAPE_INTERVAL_MINUTES, default 5):
-    Poll the X API for anything matching the tracked accounts/keywords and
-    store new tweets in SQLite. Nothing else happens here.
+Stage 1 - SCRAPE + PUSH (every SCRAPE_INTERVAL_MINUTES, default 5):
+    Poll the X API for anything matching the tracked accounts/keywords,
+    store new tweets in SQLite, and push every one of them straight to
+    Telegram -- unfiltered, no AI involved at this point.
 
-Stage 2 - CLASSIFY + ALERT (runs right after every scrape):
-    Every tweet the scrape just pulled in gets sent to Claude for
-    classification. Any tweet the AI marks "useful" (complaint / genuine
-    question / advice / recommendation) is immediately pushed to Telegram.
-    Tweets marked not-useful (promotional/KOL/other) are NOT alerted, but
-    stay in the DB with their classification for the report.
-
-Stage 3 - REPORT (every REPORT_INTERVAL_MINUTES, default 60):
-    Independent of stage 2's alerting. Pulls EVERY tweet scraped (useful and
-    not-useful alike) since the last report, along with its AI category and
-    reasoning, renders a PDF, and sends it to Telegram.
+Stage 2 - REPORT (every REPORT_INTERVAL_MINUTES, default 60):
+    Independent of stage 1. First runs AI classification (analyze +
+    categorize: complaint / question / advice / recommendation / promotional
+    / other) over every tweet scraped since the last report, THEN renders a
+    PDF listing all of them with their category + reasoning, and sends it to
+    Telegram. This is the only point the AI ever looks at a tweet.
 
 Run:
     python main.py                # start the full scheduler loop (default)
-    python main.py --scrape-now   # run one scrape+classify+alert cycle immediately, then exit
-    python main.py --report-now   # generate + send one PDF report immediately, then exit
+    python main.py --scrape-now   # run one scrape+push cycle immediately, then exit
+    python main.py --report-now   # classify pending + generate/send one PDF report, then exit
 
 Stop with Ctrl+C. Designed to run continuously (e.g. under systemd, tmux, or a
 Docker container) since it uses an in-process scheduler loop.
@@ -33,7 +29,6 @@ import schedule
 import config
 import db
 import x_scraper
-import ai_classifier
 import telegram_notifier
 import reporter
 
@@ -44,58 +39,28 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-def scrape_job() -> int:
-    """Stage 1: poll the X API and store any new matching tweets. Nothing else."""
+def scrape_and_push_job() -> None:
+    """Stage 1: poll the X API, store new tweets, push every one to Telegram
+    immediately with no AI filtering."""
     try:
-        return x_scraper.scrape_and_store()
+        x_scraper.scrape_and_store()
     except Exception:
         log.exception("Scrape step failed.")
-        return 0
-
-
-def classify_and_alert_job() -> None:
-    """Stage 2: classify whatever is unclassified, alert on every useful result."""
-    try:
-        pending = db.get_unclassified_tweets(limit=200)
-        for tweet in pending:
-            result = ai_classifier.classify_tweet(tweet["text"])
-            db.mark_classified(
-                tweet["tweet_id"], result["useful"], result["category"], result["reasoning"]
-            )
-            log.info(
-                "Classified @%s [%s | useful=%s]: %s\n    Reasoning: %s",
-                tweet["author_username"] or "unknown",
-                result["category"],
-                result["useful"],
-                tweet["text"],
-                result["reasoning"],
-            )
-        if pending:
-            log.info("Classified %d tweet(s).", len(pending))
-    except Exception:
-        log.exception("Classification step failed.")
-        return  # don't attempt to alert on a classification pass that blew up
+        return
 
     try:
-        to_send = db.get_useful_unsent_tweets(limit=100)
+        to_send = db.get_unsent_tweets(limit=200)
         for tweet in to_send:
-            if telegram_notifier.send_alert_tweet(tweet):
+            if telegram_notifier.send_new_tweet(tweet):
                 db.mark_sent_to_telegram(tweet["tweet_id"])
         if to_send:
-            log.info("Sent %d useful tweet alert(s) to Telegram.", len(to_send))
+            log.info("Pushed %d new tweet(s) to Telegram.", len(to_send))
     except Exception:
-        log.exception("Telegram alert step failed.")
-
-
-def scrape_then_classify_and_alert() -> None:
-    """Runs every SCRAPE_INTERVAL_MINUTES: stage 1 followed immediately by stage 2,
-    so every scrape result gets classified and, if useful, alerted right away."""
-    scrape_job()
-    classify_and_alert_job()
+        log.exception("Telegram push step failed.")
 
 
 def report_job() -> None:
-    """Stage 3: independent hourly (configurable) PDF report of everything scraped."""
+    """Stage 2: classify everything pending, then build + send the PDF report."""
     try:
         reporter.generate_and_send_report()
     except Exception:
@@ -107,15 +72,15 @@ def main() -> None:
     parser.add_argument(
         "--scrape-now",
         action="store_true",
-        help="Run one scrape + classify + alert cycle immediately, then exit "
-        "without starting the scheduler.",
+        help="Run one scrape + push cycle immediately, then exit without "
+        "starting the scheduler.",
     )
     parser.add_argument(
         "--report-now",
         action="store_true",
-        help="Generate and send one PDF report immediately for whatever is "
-        "queued (everything classified since the last report), then exit "
-        "without starting the scheduler.",
+        help="Classify everything scraped since the last report, generate "
+        "and send one PDF report immediately, then exit without starting "
+        "the scheduler.",
     )
     args = parser.parse_args()
 
@@ -130,8 +95,8 @@ def main() -> None:
     db.init_db()
 
     if args.scrape_now:
-        log.info("Running one on-demand scrape + classify + alert cycle...")
-        scrape_then_classify_and_alert()
+        log.info("Running one on-demand scrape + push cycle...")
+        scrape_and_push_job()
         return
 
     if args.report_now:
@@ -140,7 +105,7 @@ def main() -> None:
         return
 
     log.info(
-        "Tracking accounts=%s keywords=%s | scrape+alert every %dm | report every %dm",
+        "Tracking accounts=%s keywords=%s | scrape+push every %dm | report every %dm",
         config.X_TRACK_ACCOUNTS,
         config.X_TRACK_KEYWORDS,
         config.SCRAPE_INTERVAL_MINUTES,
@@ -148,9 +113,9 @@ def main() -> None:
     )
 
     # Run once immediately on startup, then on schedule.
-    scrape_then_classify_and_alert()
+    scrape_and_push_job()
 
-    schedule.every(config.SCRAPE_INTERVAL_MINUTES).minutes.do(scrape_then_classify_and_alert)
+    schedule.every(config.SCRAPE_INTERVAL_MINUTES).minutes.do(scrape_and_push_job)
     schedule.every(config.REPORT_INTERVAL_MINUTES).minutes.do(report_job)
 
     log.info("Scheduler started. Press Ctrl+C to stop.")

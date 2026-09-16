@@ -115,14 +115,12 @@ def mark_classified(tweet_id: str, useful: bool, category: str, reasoning: str) 
         conn.commit()
 
 
-def get_useful_unsent_tweets(limit: int = 100) -> list[sqlite3.Row]:
+def get_unsent_tweets(limit: int = 100) -> list[sqlite3.Row]:
+    """Tweets not yet pushed to Telegram, regardless of AI classification --
+    alerts now go out raw/immediately, with no AI filtering at push time."""
     with contextlib.closing(_connect()) as conn:
         return conn.execute(
-            """
-            SELECT * FROM tweets
-            WHERE ai_classified = 1 AND ai_useful = 1 AND sent_to_telegram = 0
-            ORDER BY fetched_at ASC LIMIT ?
-            """,
+            "SELECT * FROM tweets WHERE sent_to_telegram = 0 ORDER BY fetched_at ASC LIMIT ?",
             (limit,),
         ).fetchall()
 

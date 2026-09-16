@@ -35,24 +35,19 @@ def _send(chat_id: str, text: str) -> bool:
     return True
 
 
-def send_alert_tweet(tweet) -> bool:
-    """Send a single 'useful' tweet alert to the alert channel."""
-    category_emoji = {
-        "complaint": "🚨",
-        "question": "❓",
-        "advice": "💡",
-        "recommendation": "👍",
-    }.get(tweet["ai_category"], "📌")
+def send_new_tweet(tweet) -> bool:
+    """Push a newly scraped tweet straight to the alert channel, unfiltered.
 
+    No AI classification has happened yet at this point -- every tweet that
+    matches the scrape query gets sent. AI categorization only happens later,
+    when the periodic report is generated.
+    """
     author = tweet["author_username"] or "unknown"
     text = html.escape(tweet["text"])
-    reasoning = html.escape(tweet["ai_reasoning"] or "")
 
     message = (
-        f"{category_emoji} <b>{tweet['ai_category'].capitalize()}</b> "
-        f"from @{html.escape(author)}\n\n"
+        f"🐦 New mention from @{html.escape(author)}\n\n"
         f"{text}\n\n"
-        f"<i>Why flagged:</i> {reasoning}\n"
         f"{tweet['url']}"
     )
     return _send(config.TELEGRAM_ALERT_CHAT_ID, message)
