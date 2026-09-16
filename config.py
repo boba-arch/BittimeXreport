@@ -19,6 +19,16 @@ ANTHROPIC_REPORT_MODEL = os.getenv("ANTHROPIC_REPORT_MODEL", "claude-sonnet-5")
 # Max tokens Claude can use per tweet classification. Higher = more room for
 # the model to actually reason about nuance before answering.
 ANTHROPIC_CLASSIFY_MAX_TOKENS = int(os.getenv("ANTHROPIC_CLASSIFY_MAX_TOKENS", "1024"))
+# Master switch for AI analysis of scraped tweets. When "true" (default),
+# the report step classifies every tweet (complaint/question/advice/
+# recommendation/promotional/other) and writes an AI summary. When "false",
+# tweet pushing to Telegram is unaffected (it's always raw/unfiltered) but
+# the report just lists tweets with counts -- no categorization, no AI
+# summary, and no Anthropic API calls at all. Toggle via Railway variables
+# without touching code.
+AI_ANALYSIS_ENABLED = os.getenv("AI_ANALYSIS_ENABLED", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -26,8 +36,8 @@ TELEGRAM_ALERT_CHAT_ID = os.getenv("TELEGRAM_ALERT_CHAT_ID", "")
 TELEGRAM_REPORT_CHAT_ID = os.getenv("TELEGRAM_REPORT_CHAT_ID", "") or TELEGRAM_ALERT_CHAT_ID
 
 # --- Monitoring targets ---
-X_TRACK_ACCOUNTS = _split_csv(os.getenv("X_TRACK_ACCOUNTS", "bittimeexchange"))
-X_TRACK_KEYWORDS = _split_csv(os.getenv("X_TRACK_KEYWORDS", "Bittime"))
+X_TRACK_ACCOUNTS = _split_csv(os.getenv("X_TRACK_ACCOUNTS", "BitrueOfficial"))
+X_TRACK_KEYWORDS = _split_csv(os.getenv("X_TRACK_KEYWORDS", "Bitrue"))
 
 # --- Timing ---
 SCRAPE_INTERVAL_MINUTES = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "5"))
@@ -68,8 +78,8 @@ def validate() -> list[str]:
     problems = []
     if not X_BEARER_TOKEN:
         problems.append("X_BEARER_TOKEN is not set")
-    if not ANTHROPIC_API_KEY:
-        problems.append("ANTHROPIC_API_KEY is not set")
+    if AI_ANALYSIS_ENABLED and not ANTHROPIC_API_KEY:
+        problems.append("ANTHROPIC_API_KEY is not set (required while AI_ANALYSIS_ENABLED=true)")
     if not TELEGRAM_BOT_TOKEN:
         problems.append("TELEGRAM_BOT_TOKEN is not set")
     if not TELEGRAM_ALERT_CHAT_ID:

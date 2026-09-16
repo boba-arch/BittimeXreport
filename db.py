@@ -146,6 +146,17 @@ def get_tweets_for_report(limit: int = 500) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def get_all_unreported_tweets(limit: int = 500) -> list[sqlite3.Row]:
+    """Every tweet not yet folded into a report, oldest first -- regardless of
+    AI classification state. Used when AI_ANALYSIS_ENABLED is false, so the
+    report can still list raw tweets even though none were ever classified."""
+    with contextlib.closing(_connect()) as conn:
+        return conn.execute(
+            "SELECT * FROM tweets WHERE included_in_report = 0 ORDER BY fetched_at ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+
 def mark_included_in_report(tweet_ids: list[str]) -> None:
     if not tweet_ids:
         return

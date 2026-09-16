@@ -12,10 +12,17 @@ log = logging.getLogger("x_scraper")
 
 SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
 SINCE_ID_META_KEY = "x_search_since_id"
+# Tracks the timestamp of the last poll, even when it found zero tweets.
+# This is what closes the gap: without it, every "no results" cycle would
+# independently look back only INITIAL_LOOKBACK_MINUTES from "now", leaving
+# a blind spot between polls whenever nothing matched in that short window.
+LAST_POLL_META_KEY = "x_search_last_poll_at"
 
 TWEET_FIELDS = "created_at,author_id,text"
 USER_FIELDS = "username"
 EXPANSIONS = "author_id"
+
+_TIME_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def _headers() -> dict:
@@ -29,14 +36,19 @@ def fetch_new_tweets() -> list[dict]:
     is only ever processed once. Returns a list of plain dicts ready for
     db.insert_tweet.
 
-    On a cold start (no since_id saved yet -- e.g. first ever run, or a fresh
-    deploy without a persistent volume), this does NOT pull X's full 7-day
-    recent-search history. Instead it uses `start_time` to only look back
-    INITIAL_LOOKBACK_MINUTES, so you don't get flooded with days-old tweets.
+    Once a tweet has ever been found, since_id takes over and guarantees a
+    gapless, ID-based watermark. Before that (first-ever run, or any run in
+    a streak that keeps finding zero tweets), start_time is used instead --
+    and it always continues from the end of the PREVIOUS poll's window
+    (not from "now - INITIAL_LOOKBACK_MINUTES" every time), so back-to-back
+    empty polls never leave an uncovered gap. INITIAL_LOOKBACK_MINUTES only
+    bounds how far back the very first poll ever looks.
     """
     query = config.build_search_query()
     since_id = db.get_meta(SINCE_ID_META_KEY)
+    last_poll_at = db.get_meta(LAST_POLL_META_KEY)
 
+    now = datetime.now(timezone.utc)
     collected: list[dict] = []
     newest_id_seen = since_id
     next_token = None
@@ -52,12 +64,17 @@ def fetch_new_tweets() -> list[dict]:
         if since_id:
             params["since_id"] = since_id
         else:
-            # Cold start: cap how far back we look instead of defaulting to
-            # X's full 7-day recent-search window.
-            start_time = datetime.now(timezone.utc) - timedelta(
-                minutes=config.INITIAL_LOOKBACK_MINUTES
-            )
-            params["start_time"] = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            if last_poll_at:
+                start_time = datetime.strptime(last_poll_at, _TIME_FMT).replace(
+                    tzinfo=timezone.utc
+                )
+            else:
+                start_time = now - timedelta(minutes=config.INITIAL_LOOKBACK_MINUTES)
+            # X requires start_time to be at least ~10 seconds in the past.
+            latest_allowed = now - timedelta(seconds=10)
+            if start_time > latest_allowed:
+                start_time = latest_allowed
+            params["start_time"] = start_time.strftime(_TIME_FMT)
         if next_token:
             params["next_token"] = next_token
 
@@ -100,6 +117,12 @@ def fetch_new_tweets() -> list[dict]:
 
     if newest_id_seen and newest_id_seen != since_id:
         db.set_meta(SINCE_ID_META_KEY, newest_id_seen)
+
+    if not since_id:
+        # Advance the time watermark every poll, found-something or not, so
+        # the next start_time-based poll picks up exactly where this one
+        # left off instead of re-using a short, fixed lookback each time.
+        db.set_meta(LAST_POLL_META_KEY, now.strftime(_TIME_FMT))
 
     return collected
 

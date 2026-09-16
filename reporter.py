@@ -40,7 +40,7 @@ def _get_client() -> anthropic.Anthropic:
 
 
 REPORT_SYSTEM_PROMPT = """You write short, plain-English social-listening reports for \
-a crypto exchange's ops team covering Bittime. You will be given a list of \
+a crypto exchange's ops team covering Bitrue. You will be given a list of \
 tweets from the last reporting window, each with the AI triage category and reasoning \
 already applied. Write a concise report (150-300 words) covering:
 1. Overall volume and sentiment/tone at a glance.
@@ -132,10 +132,11 @@ def _build_pdf(
     now: datetime,
     window_label: str,
     total_count: int,
-    useful_count: int,
+    useful_count: int | None,
     category_counts: Counter,
     ai_summary: str,
     tweets,
+    ai_enabled: bool,
 ) -> None:
     styles = _build_styles()
     doc = SimpleDocTemplate(
@@ -163,9 +164,11 @@ def _build_pdf(
 
     # --- Stats table ---
     story.append(Paragraph("Overview", styles["SectionHeading"]))
-    stats_rows = [["Total tweets", str(total_count)], ["Flagged useful", str(useful_count)]]
-    for cat, count in category_counts.most_common():
-        stats_rows.append([cat.capitalize(), str(count)])
+    stats_rows = [["Total tweets", str(total_count)]]
+    if ai_enabled:
+        stats_rows.append(["Flagged useful", str(useful_count)])
+        for cat, count in category_counts.most_common():
+            stats_rows.append([cat.capitalize(), str(count)])
     stats_table = Table(stats_rows, colWidths=[3 * inch, 2 * inch])
     stats_table.setStyle(
         TableStyle(
@@ -192,16 +195,23 @@ def _build_pdf(
     if tweets:
         story.append(Paragraph("Tweet Detail", styles["SectionHeading"]))
         for t in tweets:
-            cat = t["ai_category"] or "other"
-            color_hex = CATEGORY_COLORS.get(cat, "#7f8c8d")
             author = escape(t["author_username"] or "unknown")
             text = escape(t["text"] or "")
-            reasoning = escape(t["ai_reasoning"] or "")
-            line = (
-                f'<font color="{color_hex}"><b>[{cat.upper()}]</b></font> '
-                f"@{author}: {text}<br/>"
-                f'<font color="#666666" size="9">Why: {reasoning} &nbsp;|&nbsp; {escape(t["url"] or "")}</font>'
-            )
+            url = escape(t["url"] or "")
+            if ai_enabled:
+                cat = t["ai_category"] or "other"
+                color_hex = CATEGORY_COLORS.get(cat, "#7f8c8d")
+                reasoning = escape(t["ai_reasoning"] or "")
+                line = (
+                    f'<font color="{color_hex}"><b>[{cat.upper()}]</b></font> '
+                    f"@{author}: {text}<br/>"
+                    f'<font color="#666666" size="9">Why: {reasoning} &nbsp;|&nbsp; {url}</font>'
+                )
+            else:
+                line = (
+                    f"@{author}: {text}<br/>"
+                    f'<font color="#666666" size="9">{url}</font>'
+                )
             story.append(Paragraph(line, styles["TweetLine"]))
 
     doc.build(story)
@@ -210,11 +220,15 @@ def _build_pdf(
 def classify_pending_tweets() -> int:
     """Run AI classification over every tweet scraped since the last report.
 
-    This is the ONLY place classification happens now -- tweets are pushed to
+    This is the ONLY place classification happens -- tweets are pushed to
     Telegram raw/unfiltered the moment they're scraped, and the AI only
     analyzes + categorizes them here, right before the report is built.
+    No-op (and makes no Anthropic API calls) when AI_ANALYSIS_ENABLED=false.
     Returns how many tweets were classified.
     """
+    if not config.AI_ANALYSIS_ENABLED:
+        return 0
+
     pending = db.get_unclassified_tweets(limit=1000)
     for tweet in pending:
         result = ai_classifier.classify_tweet(tweet["text"])
@@ -235,20 +249,32 @@ def classify_pending_tweets() -> int:
 
 
 def generate_report() -> tuple[str, str]:
-    """Classify anything pending, build the PDF report, save it to disk, and
-    return (pdf_path, short_caption)."""
-    classify_pending_tweets()
-
-    tweets = db.get_tweets_for_report(limit=1000)
-
+    """Classify anything pending (if AI_ANALYSIS_ENABLED), build the PDF
+    report, save it to disk, and return (pdf_path, short_caption)."""
+    ai_enabled = config.AI_ANALYSIS_ENABLED
     now = datetime.now(timezone.utc)
     window_label = f"{config.REPORT_INTERVAL_MINUTES}-minute"
 
-    category_counts = Counter(t["ai_category"] for t in tweets)
-    useful_count = sum(1 for t in tweets if t["ai_useful"])
-    total_count = len(tweets)
+    if ai_enabled:
+        classify_pending_tweets()
+        tweets = db.get_tweets_for_report(limit=1000)
+        category_counts = Counter(t["ai_category"] for t in tweets)
+        useful_count = sum(1 for t in tweets if t["ai_useful"])
+        ai_summary = _ai_summarize(tweets)
+        caption_useful_line = f"Total: {len(tweets)} | Useful: {useful_count}"
+    else:
+        tweets = db.get_all_unreported_tweets(limit=1000)
+        category_counts = Counter()
+        useful_count = None
+        ai_summary = (
+            "AI analysis is currently disabled (AI_ANALYSIS_ENABLED=false on "
+            "Railway). This report lists every tweet scraped in this window "
+            "with no categorization or reasoning. Set AI_ANALYSIS_ENABLED=true "
+            "to re-enable classification and this summary."
+        )
+        caption_useful_line = f"Total: {len(tweets)} (AI analysis off)"
 
-    ai_summary = _ai_summarize(tweets)
+    total_count = len(tweets)
 
     os.makedirs(config.REPORTS_DIR, exist_ok=True)
     filename = os.path.join(
@@ -256,16 +282,13 @@ def generate_report() -> tuple[str, str]:
     )
     _build_pdf(
         filename, now, window_label, total_count, useful_count,
-        category_counts, ai_summary, tweets,
+        category_counts, ai_summary, tweets, ai_enabled,
     )
     log.info("PDF report saved to %s", filename)
 
     db.mark_included_in_report([t["tweet_id"] for t in tweets])
 
-    caption = (
-        f"\U0001F4CA Bittime X monitor \u2014 last {window_label}\n"
-        f"Total: {total_count} | Useful: {useful_count}"
-    )
+    caption = f"\U0001F4CA Bittime X monitor \u2014 last {window_label}\n{caption_useful_line}"
     return filename, caption
 
 

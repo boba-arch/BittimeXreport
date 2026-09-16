@@ -110,6 +110,11 @@ The scraper builds a single query like:
 - `since_id` is tracked in the DB so each poll only pulls tweets newer than
   the last one seen — no duplicate work, no missed tweets between polls
   (within X API's recent-search 7-day window).
+- Before `since_id` exists yet (very first run, or any run that keeps
+  finding zero tweets), a time-based watermark is used instead and it
+  advances every poll -- even ones with zero results -- so there's never a
+  gap between one poll's window and the next. Only the very first poll ever
+  is bounded by `INITIAL_LOOKBACK_MINUTES`.
 - Recent-search query length limits depend on your API access tier; if you
   add many more accounts/keywords and hit a 400 error mentioning query length,
   trim the list.
