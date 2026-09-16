@@ -60,7 +60,11 @@ def classify_and_alert_job() -> None:
     try:
         pending = db.get_unclassified_tweets(limit=200)
         for tweet in pending:
-            result = ai_classifier.classify_tweet(tweet["text"])
+            result = ai_classifier.classify_tweet(
+                tweet["text"],
+                parent_text=tweet["parent_tweet_text"],
+                parent_author=tweet["parent_author_username"],
+            )
             db.mark_classified(
                 tweet["tweet_id"], result["useful"], result["category"], result["reasoning"]
             )

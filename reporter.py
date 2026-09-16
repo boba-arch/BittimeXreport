@@ -28,6 +28,22 @@ import telegram_notifier
 
 log = logging.getLogger("reporter")
 
+
+def _format_timestamp(raw: str | None) -> str:
+    """Format an ISO8601 timestamp (X API's created_at, or our own fetched_at)
+    into a short human-readable UTC string for the PDF. Returns "" if raw is
+    missing or unparseable, so the caller can fall back gracefully."""
+    if not raw:
+        return ""
+    try:
+        # X API uses "...Z"; our own fetched_at uses "+00:00" -- normalize both.
+        cleaned = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except (ValueError, TypeError):
+        return ""
+
+
 _client = None
 
 
@@ -196,10 +212,12 @@ def _build_pdf(
             author = escape(t["author_username"] or "unknown")
             text = escape(t["text"] or "")
             reasoning = escape(t["ai_reasoning"] or "")
+            posted_at = _format_timestamp(t["created_at"]) or _format_timestamp(t["fetched_at"])
+            timestamp_html = f" &nbsp;|&nbsp; {posted_at}" if posted_at else ""
             line = (
                 f'<font color="{color_hex}"><b>[{cat.upper()}]</b></font> '
                 f"@{author}: {text}<br/>"
-                f'<font color="#666666" size="9">Why: {reasoning} &nbsp;|&nbsp; {escape(t["url"] or "")}</font>'
+                f'<font color="#666666" size="9">Why: {reasoning} &nbsp;|&nbsp; {escape(t["url"] or "")}{timestamp_html}</font>'
             )
             story.append(Paragraph(line, styles["TweetLine"]))
 

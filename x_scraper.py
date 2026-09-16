@@ -18,9 +18,13 @@ SINCE_ID_META_KEY = "x_search_since_id"
 # a blind spot between polls whenever nothing matched in that short window.
 LAST_POLL_META_KEY = "x_search_last_poll_at"
 
-TWEET_FIELDS = "created_at,author_id,text"
+TWEET_FIELDS = "created_at,author_id,text,referenced_tweets"
 USER_FIELDS = "username"
-EXPANSIONS = "author_id"
+# referenced_tweets.id pulls the parent tweet (if this is a reply/quote) into
+# includes.tweets with its own text; referenced_tweets.id.author_id also
+# pulls that parent tweet's author into includes.users -- both come back in
+# this same request, no extra API call needed.
+EXPANSIONS = "author_id,referenced_tweets.id,referenced_tweets.id.author_id"
 
 _TIME_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -34,7 +38,9 @@ def fetch_new_tweets() -> list[dict]:
 
     Handles pagination (next_token) and the since_id watermark so each tweet
     is only ever processed once. Returns a list of plain dicts ready for
-    db.insert_tweet.
+    db.insert_tweet -- including parent_tweet_id / parent_tweet_text /
+    parent_author_username when the tweet is a reply, so the classifier can
+    use the tweet it's replying to as extra context.
 
     Once a tweet has ever been found, since_id takes over and guarantees a
     gapless, ID-based watermark. Before that (first-ever run, or any run in
@@ -87,14 +93,30 @@ def fetch_new_tweets() -> list[dict]:
         resp.raise_for_status()
         payload = resp.json()
 
-        users_by_id = {
-            u["id"]: u for u in payload.get("includes", {}).get("users", [])
-        }
+        includes = payload.get("includes", {})
+        users_by_id = {u["id"]: u for u in includes.get("users", [])}
+        # Parent/quoted tweets referenced by anything in this page, keyed by
+        # their own tweet ID, so we can look up "what tweet is this a reply to".
+        tweets_by_id = {t["id"]: t for t in includes.get("tweets", [])}
 
         for t in payload.get("data", []):
             author = users_by_id.get(t.get("author_id"), {})
             username = author.get("username")
             tweet_id = t["id"]
+
+            parent_tweet_id = None
+            parent_tweet_text = None
+            parent_author_username = None
+            for ref in t.get("referenced_tweets") or []:
+                if ref.get("type") == "replied_to":
+                    parent_tweet_id = ref.get("id")
+                    parent = tweets_by_id.get(parent_tweet_id)
+                    if parent:
+                        parent_tweet_text = parent.get("text")
+                        parent_author = users_by_id.get(parent.get("author_id"), {})
+                        parent_author_username = parent_author.get("username")
+                    break
+
             collected.append(
                 {
                     "tweet_id": tweet_id,
@@ -104,6 +126,9 @@ def fetch_new_tweets() -> list[dict]:
                     "matched_query": query,
                     "created_at": t.get("created_at"),
                     "url": f"https://x.com/{username or 'i'}/status/{tweet_id}",
+                    "parent_tweet_id": parent_tweet_id,
+                    "parent_tweet_text": parent_tweet_text,
+                    "parent_author_username": parent_author_username,
                 }
             )
             if newest_id_seen is None or int(tweet_id) > int(newest_id_seen):
@@ -137,11 +162,17 @@ def scrape_and_store() -> int:
     for tw in tweets:
         if db.insert_tweet(tw):
             inserted += 1
+            reply_note = (
+                f"  [reply to @{tw['parent_author_username']}]"
+                if tw.get("parent_tweet_text")
+                else ""
+            )
             log.info(
-                "Caught tweet from @%s: %s  (%s)",
+                "Caught tweet from @%s: %s  (%s)%s",
                 tw.get("author_username") or "unknown",
                 tw["text"],
                 tw.get("url"),
+                reply_note,
             )
     if inserted:
         log.info("Stored %d new tweet(s).", inserted)

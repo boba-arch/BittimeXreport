@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS tweets (
     fetched_at      TEXT NOT NULL,  -- when our scraper pulled it (UTC ISO8601)
     url             TEXT,
 
+    -- If this tweet is a reply, the tweet it's replying to (for AI context).
+    -- NULL when it's not a reply, or the parent couldn't be resolved.
+    parent_tweet_id        TEXT,
+    parent_tweet_text      TEXT,
+    parent_author_username TEXT,
+
     ai_classified   INTEGER NOT NULL DEFAULT 0,  -- 0/1
     ai_useful       INTEGER,                     -- 0/1, NULL until classified
     ai_category     TEXT,                        -- complaint/question/advice/recommendation/promotional/other
@@ -32,6 +38,15 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+# Columns added after the initial release, applied via ALTER TABLE for anyone
+# upgrading with an existing DB file (CREATE TABLE IF NOT EXISTS won't add
+# columns to a table that already exists).
+_MIGRATIONS = [
+    "ALTER TABLE tweets ADD COLUMN parent_tweet_id TEXT",
+    "ALTER TABLE tweets ADD COLUMN parent_tweet_text TEXT",
+    "ALTER TABLE tweets ADD COLUMN parent_author_username TEXT",
+]
+
 
 def _connect() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
@@ -44,6 +59,12 @@ def init_db() -> None:
     with contextlib.closing(_connect()) as conn:
         conn.executescript(SCHEMA)
         conn.commit()
+        for stmt in _MIGRATIONS:
+            try:
+                conn.execute(stmt)
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists -- fine, nothing to do
 
 
 def now_iso() -> str:
@@ -74,8 +95,9 @@ def insert_tweet(tweet: dict) -> bool:
                 """
                 INSERT INTO tweets
                     (tweet_id, author_id, author_username, text, matched_query,
-                     created_at, fetched_at, url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     created_at, fetched_at, url,
+                     parent_tweet_id, parent_tweet_text, parent_author_username)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tweet["tweet_id"],
@@ -86,6 +108,9 @@ def insert_tweet(tweet: dict) -> bool:
                     tweet.get("created_at"),
                     now_iso(),
                     tweet.get("url"),
+                    tweet.get("parent_tweet_id"),
+                    tweet.get("parent_tweet_text"),
+                    tweet.get("parent_author_username"),
                 ),
             )
             conn.commit()

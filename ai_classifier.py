@@ -25,8 +25,11 @@ def _get_client() -> anthropic.Anthropic:
 
 
 SYSTEM_PROMPT = """You are a triage assistant for a crypto exchange's social listening \
-pipeline. You will be given a single tweet that mentions "Bittime" or \
-@bittimeexchange.
+pipeline. You will be given a tweet that mentions "Bittime" or @bittimeexchange. \
+Sometimes the tweet is a reply, in which case you will also be given the \
+original tweet it's replying to -- use that as context for what the reply is \
+actually about (e.g. a one-word reply like "same" or "+1" only makes sense in \
+light of what it's replying to).
 
 Think through the tweet carefully before answering: consider the tone, whether \
 it reads as a real personal experience vs. copy-paste marketing, whether it \
@@ -44,9 +47,10 @@ Classify the tweet into exactly one category:
 - "other": anything else (news mentions, unrelated context, jokes, etc.)
 
 A tweet is "useful" (useful=true) only if it is a complaint, genuine question, \
-advice, or genuine recommendation that a human on the Bittime team \
+advice, or genuine recommendation that a human on the Bittime team should \
 actually read and possibly respond to. Promotional/marketing/KOL hype and "other" \
-are NOT useful.
+are NOT useful. Classify only the REPLY itself (not the parent tweet) -- the \
+parent is context, not the thing being judged.
 
 Respond with ONLY a single JSON object, no markdown fences, no preamble, in \
 exactly this shape:
@@ -54,19 +58,39 @@ exactly this shape:
 """
 
 
-def classify_tweet(text: str) -> dict:
+def classify_tweet(
+    text: str,
+    parent_text: str | None = None,
+    parent_author: str | None = None,
+) -> dict:
     """Classify a single tweet's text. Returns dict with useful/category/reasoning.
+
+    If the tweet is a reply, pass the tweet it's replying to via parent_text
+    (and optionally parent_author) so the model has the conversational
+    context -- this matters a lot for short replies like "same issue here"
+    that are meaningless on their own.
 
     Fails safe: on any error, marks the tweet as not useful/other so a pipeline
     hiccup never silently blocks the loop, and logs the issue.
     """
     client = _get_client()
+
+    if parent_text:
+        who = f"@{parent_author}" if parent_author else "someone"
+        user_content = (
+            f'This is a REPLY. The original tweet it\'s replying to (by {who}):\n'
+            f'"{parent_text}"\n\n'
+            f"The reply to classify:\n{text}"
+        )
+    else:
+        user_content = f"Tweet:\n{text}"
+
     try:
         response = client.messages.create(
             model=config.ANTHROPIC_CLASSIFY_MODEL,
             max_tokens=config.ANTHROPIC_CLASSIFY_MAX_TOKENS,
             system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": f"Tweet:\n{text}"}],
+            messages=[{"role": "user", "content": user_content}],
         )
         raw = "".join(
             block.text for block in response.content if block.type == "text"
